@@ -1,0 +1,40 @@
+{
+  "name": "medpilot",
+  "version": "0.1.0",
+  "description": "MedPilot MVP - 医嘱执行与健康资料管理助手",
+  "main": "dist/src/index.js",
+  "bin": {
+    "medpilot": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/src/cli.js",
+    "api": "node dist/src/api.js",
+    "api:dev": "tsx src/api.ts",
+    "test": "node --test dist/tests/**/*.test.js",
+    "test:src": "node --import tsx --test tests/**/*.test.ts",
+    "check": "npm run build && npm run test"
+  },
+  "keywords": [
+    "health",
+    "medication",
+    "chronic-disease",
+    "reminder",
+    "medical-record",
+    "medpilot"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

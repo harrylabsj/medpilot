@@ -1,0 +1,37 @@
+#!/usr/bin/env node
+import http from 'node:http';
+import url from 'node:url';
+import path from 'node:path';
+import { MedPilotWorkflow } from './services/workflow.js';
+import { JsonStore } from './services/store.js';
+import { isoDate, nowIso } from './utils/time.js';
+import { authenticatePatient, registerPatient } from './services/auth.js';
+
+const PORT = process.env.MEDPILOT_PORT ? parseInt(process.env.MEDPILOT_PORT, 10) : 3456;
+const BASE_DIR = process.env.MEDPILOT_BASE_DIR || process.cwd();
+interface ApiResponse { success: boolean; data?: unknown; error?: string; }
+function jsonResponse(res: http.ServerResponse, statusCode: number, data: ApiResponse): void { res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data, null, 2)); }
+function parseBody(req: http.IncomingMessage): Promise<unknown> { return new Promise((resolve, reject) => { let body=''; req.on('data',(c)=> body += c); req.on('end',()=>{ try{ resolve(body ? JSON.parse(body) : {});} catch { reject(new Error('Invalid JSON')); } }); req.on('error', reject); }); }
+const workflow = new MedPilotWorkflow(BASE_DIR); const store = new JsonStore(path.join(BASE_DIR, 'data', 'db.json'));
+function requireAuth(req: http.IncomingMessage, patientId: string): string | null { const token = req.headers['x-medpilot-token']; const value = Array.isArray(token) ? token[0] : token; return authenticatePatient(store, patientId, value) ? null : 'Unauthorized'; }
+const server = http.createServer(async (req,res)=>{
+  res.setHeader('Access-Control-Allow-Origin', '*'); res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-MedPilot-Token'); if(req.method==='OPTIONS'){ res.writeHead(204); res.end(); return; }
+  const parsedUrl=url.parse(req.url || '', true); const pathname=parsedUrl.pathname || ''; const method=req.method || 'GET';
+  try {
+    if(pathname==='/health' && method==='GET'){ jsonResponse(res,200,{success:true,data:{status:'ok',timestamp:nowIso()}}); return; }
+    if(pathname==='/api/patients' && method==='POST'){ const body=await parseBody(req) as { displayName?: string }; const patient=registerPatient(store, body.displayName); jsonResponse(res,201,{success:true,data:patient}); return; }
+    if(pathname.match(/^\/api\/patients\/[^/]+$/) && method==='GET'){ const patientId=pathname.split('/')[3]; const authError=requireAuth(req,patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } const db=store.load(); const patientData={ patientId, orders:db.orders.filter((o)=>o.patientId===patientId), medications:db.medications.filter((m)=>db.orders.find((o)=>o.id===m.orderId)?.patientId===patientId), reminders:db.reminders.filter((r)=>r.patientId===patientId), intakeLogs:db.intakeLogs.filter((i)=>i.patientId===patientId), metrics:db.metrics.filter((m)=>m.patientId===patientId), events:db.events.filter((e)=>e.patientId===patientId), auditLogs: db.auditLogs.filter((a)=>a.patientId===patientId) }; jsonResponse(res,200,{success:true,data:patientData}); return; }
+    if(pathname==='/api/orders' && method==='POST'){ const body=await parseBody(req) as { patientId:string; text:string }; if(!body.patientId || !body.text){ jsonResponse(res,400,{success:false,error:'Missing patientId or text'}); return; } const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } const result=workflow.ingestOrder(body.patientId,body.text); jsonResponse(res,201,{success:true,data:result}); return; }
+    if(pathname==='/api/orders/confirm' && method==='POST'){ const body=await parseBody(req) as { patientId:string; orderId:string }; const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,200,{success:true,data:workflow.confirmOrder(body.patientId, body.orderId)}); return; }
+    if(pathname==='/api/orders/replace' && method==='POST'){ const body=await parseBody(req) as { patientId:string; oldOrderId:string; text:string }; const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,201,{success:true,data:workflow.replaceOrder(body.patientId, body.oldOrderId, body.text)}); return; }
+    if(pathname==='/api/intakes' && method==='POST'){ const body=await parseBody(req) as { patientId:string; medicationId:string; plannedTime:string; actualTime?:string; note?:string }; const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,201,{success:true,data:workflow.recordIntakeWithState(body)}); return; }
+    if(pathname==='/api/intakes/skip' && method==='POST'){ const body=await parseBody(req) as { patientId:string; medicationId:string; plannedTime:string; skippedBy:'doctor'|'patient'; reason?:string }; const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,201,{success:true,data:workflow.skipIntake(body)}); return; }
+    if(pathname==='/api/metrics' && method==='POST'){ const body=await parseBody(req) as { patientId:string; type:any; values:any; unit?:string }; const authError=requireAuth(req,body.patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,201,{success:true,data:workflow.recordMetric({ patientId:body.patientId, type:body.type, values:body.values, unit:body.unit })}); return; }
+    if(pathname==='/api/scheduler/run' && method==='POST'){ jsonResponse(res,200,{success:true,data:workflow.runReminderScheduler()}); return; }
+    if(pathname.match(/^\/api\/patients\/[^/]+\/report$/) && method==='GET'){ const patientId=pathname.split('/')[3]; const authError=requireAuth(req,patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } const { startDate, endDate } = parsedUrl.query; jsonResponse(res,200,{success:true,data:workflow.buildReport(patientId,{ startDate:startDate as string|undefined, endDate:endDate as string|undefined })}); return; }
+    if(pathname.match(/^\/api\/patients\/[^/]+\/expected-intakes$/) && method==='GET'){ const patientId=pathname.split('/')[3]; const authError=requireAuth(req,patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } const { startDate, endDate }=parsedUrl.query; const today=isoDate(nowIso()); const weekLater=isoDate(new Date(Date.now()+7*24*60*60*1000).toISOString()); jsonResponse(res,200,{success:true,data:workflow.getExpectedIntakes(patientId,(startDate as string)||today,(endDate as string)||weekLater)}); return; }
+    if(pathname.match(/^\/api\/patients\/[^/]+\/reminders$/) && method==='GET'){ const patientId=pathname.split('/')[3]; const authError=requireAuth(req,patientId); if(authError){ jsonResponse(res,401,{success:false,error:authError}); return; } jsonResponse(res,200,{success:true,data:workflow.listActiveReminders(patientId)}); return; }
+    jsonResponse(res,404,{success:false,error:'Not found'});
+  } catch (error) { jsonResponse(res,500,{success:false,error:error instanceof Error ? error.message : 'Internal server error'}); }
+});
+server.listen(PORT, ()=> console.log(`MedPilot API server running at http://localhost:${PORT}`));
